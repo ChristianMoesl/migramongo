@@ -15,13 +15,12 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
+import lombok.val;
 import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
-import org.mockito.Mock;
-import org.mockito.Mockito;
+import org.mockito.*;
 
 import com.mongodb.client.MongoDatabase;
 import com.rinoto.migramongo.MigraMongoStatus.MigrationStatus;
@@ -705,6 +704,9 @@ public class MigraMongoTest {
             entry.setReruns(Arrays.asList(migRun));
             return entry;
         });
+        val entryWithRun = createMigrationEntry("1", "2", MigrationStatus.OK);
+        entryWithRun.setReruns(List.of(MigrationRun.builder().status(MigrationStatus.OK).statusMessage("Migration re-run completed successfully").build()));
+        when(migEntryService.setLastReRunToFinished(entry)).thenReturn(entryWithRun);
 
         // when
         final MigraMongoStatus status = migraMongo.rerun("1", "2");
@@ -723,7 +725,7 @@ public class MigraMongoTest {
         assertThat(migrationApplied.getReruns(), hasSize(1));
         final MigrationRun migrationRun = migrationApplied.getReruns().get(0);
         assertThat(migrationRun.status, is(MigrationStatus.OK));
-        assertThat(migrationRun.statusMessage, is("Migration completed correctly"));
+        assertThat(migrationRun.statusMessage, is("Migration re-run completed successfully"));
         verify(mongoScript).migrate(mongoDatabase);
     }
 
@@ -731,7 +733,8 @@ public class MigraMongoTest {
     public void shouldAddRerunEntryIfScriptFails() throws Exception {
         // given
         final MigrationEntry entry = mockEntry("1", "2", MigrationStatus.OK);
-        final MongoMigrationScript mongoScript = mockMongoScript("1", "2", new RuntimeException("whatever exception"));
+        final Exception exception = new RuntimeException("whatever exception");
+        final MongoMigrationScript mongoScript = mockMongoScript("1", "2", exception);
         final List<MongoMigrationScript> mongoScripts = Arrays.asList(mongoScript);
         when(lookupService.findMongoScripts()).thenReturn(mongoScripts);
         when(migEntryService.addRunToMigrationEntry(eq(entry), any(MigrationRun.class))).thenAnswer(i -> {
@@ -739,6 +742,13 @@ public class MigraMongoTest {
             entry.setReruns(Arrays.asList(migRun));
             return entry;
         });
+        val entryWithRun = createMigrationEntry("1", "2", MigrationStatus.ERROR);
+        entryWithRun.setReruns(List.of(MigrationRun.builder()
+                .status(MigrationStatus.ERROR)
+                .statusMessage("Migration re-run failed with: whatever exception")
+                .build()));
+        when(migEntryService.setLastReRunToFailed(eq(entry), eq(exception)))
+                .thenReturn(entryWithRun);
 
         // when
         final MigraMongoStatus status = migraMongo.rerun("1", "2");
@@ -756,8 +766,37 @@ public class MigraMongoTest {
         assertThat(migrationApplied.getReruns(), hasSize(1));
         final MigrationRun migrationRun = migrationApplied.getReruns().get(0);
         assertThat(migrationRun.status, is(MigrationStatus.ERROR));
-        assertThat(migrationRun.statusMessage, is("whatever exception"));
+        assertThat(migrationRun.statusMessage, is("Migration re-run failed with: whatever exception"));
         verify(mongoScript).migrate(mongoDatabase);
+    }
+
+    @Test
+    public void shouldSetInProgressStatusDuringMigrationRerun() throws Exception {
+        // given
+        final MigrationEntry entry = mockEntry("1", "2", MigrationStatus.OK);
+        final MongoMigrationScript mongoScript = mockMongoScript("1", "2", (Boolean) null);
+        final List<MongoMigrationScript> mongoScripts = Arrays.asList(mongoScript);
+        when(lookupService.findMongoScripts()).thenReturn(mongoScripts);
+        when(migEntryService.addRunToMigrationEntry(eq(entry), any(MigrationRun.class))).thenAnswer(i -> {
+            final MigrationRun migRun = (MigrationRun) i.getArguments()[1];
+            entry.setReruns(Arrays.asList(migRun));
+            return entry;
+        });
+        ArgumentCaptor<MigrationRun> migrationRunArgumentCaptor = ArgumentCaptor.forClass(MigrationRun.class);
+        doAnswer((answer) -> {
+            verify(migEntryService).addRunToMigrationEntry(any(), migrationRunArgumentCaptor.capture());
+            return null;
+        }).when(mongoScript).migrate(any(MongoDatabase.class));
+
+        // when
+        final MigraMongoStatus status = migraMongo.rerun("1", "2");
+
+        // then
+        final MigrationRun inProgressRun = migrationRunArgumentCaptor.getValue();
+        assertThat(inProgressRun.getStatus(), is(MigrationStatus.IN_PROGRESS));
+        assertThat(inProgressRun.getStatusMessage(), is("Migration re-run is in progress"));
+
+        assertThat(status.status, is(MigrationStatus.OK));
     }
 
     private MigrationEntry mockEntry(String fromVersion, String toVersion, MigrationStatus status) {

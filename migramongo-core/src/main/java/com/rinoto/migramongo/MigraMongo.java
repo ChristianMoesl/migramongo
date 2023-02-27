@@ -315,17 +315,21 @@ public class MigraMongo {
         }
 
         final MongoMigrationScript mongoMigrationScript = migScriptOpt.get();
-        final MigrationRun migrationRun = new MigrationRun();
+        final MigrationEntry migrationEntryWithRun = migrationHistoryService
+                .addRunToMigrationEntry(
+                        migrationEntry,
+                        MigrationRun.builder().status(MigrationStatus.IN_PROGRESS).statusMessage("Migration re-run is in progress").build());
+
         try {
             mongoMigrationScript.migrate(database);
-            final MigrationEntry migrationEntryWithRun = migrationHistoryService
-                .addRunToMigrationEntry(
-                    migrationEntry,
-                    migrationRun.complete(MigrationStatus.OK, "Migration completed correctly"));
+
+            logger.debug("resultEntry {}", migrationEntryWithRun);
+            final MigrationEntry resultEntry = migrationHistoryService.setLastReRunToFinished(migrationEntryWithRun);
+            logger.debug("resultEntry {}", resultEntry);
+
             return MigraMongoStatus
                 .ok("Re-run of Migration fromVersion " + fromVersion + " toVersion " + toVersion + " run successfully")
-                .addEntry(migrationEntryWithRun);
-
+                .addEntry(resultEntry);
         } catch (Exception e) {
             logger
                 .error(
@@ -335,8 +339,9 @@ public class MigraMongo {
                         toVersion +
                         ": " +
                         e.getMessage());
-            final MigrationEntry migrationEntryWithRun = migrationHistoryService
-                .addRunToMigrationEntry(migrationEntry, migrationRun.complete(MigrationStatus.ERROR, e.getMessage()));
+
+            final MigrationEntry resultEntry = migrationHistoryService.setLastReRunToFailed(migrationEntryWithRun, e);
+
             return MigraMongoStatus
                 .error(
                     "Error when re-running migration fromVersion " +
@@ -345,7 +350,7 @@ public class MigraMongo {
                         toVersion +
                         ": " +
                         e.getMessage())
-                .addEntry(migrationEntryWithRun);
+                .addEntry(resultEntry);
         }
     }
 
